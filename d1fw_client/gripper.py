@@ -1,0 +1,121 @@
+"""Nonblocking latest-target gripper channel over independent REST connections."""
+from __future__ import annotations
+import math
+import threading
+import time
+from . import FirmwareClient, GripperState, side_name
+
+class FirmwareGripper:
+    """Continuous latest-target worker, with independently polled feedback.
+
+    No retry after a failed/lost stroke response. The failure is raised to the
+    next caller. close/release discard queued commands and join the worker;
+    an already accepted daemon stroke can finish, but no new stroke follows.
+    """
+    def __init__(self, base_url: str, side: str):
+        self.side = side_name(side)
+        self._command = FirmwareClient(base_url, timeout=40)
+        self._reader = FirmwareClient(base_url, timeout=1)
+        self._condition = threading.Condition()
+        self._io_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._desired = None
+        self._busy = False
+        self._error = None
+        self._report: GripperState | None = None
+        self._sample_at = 0.0
+        self._command_thread = threading.Thread(target=self._run, daemon=True)
+        self._read_thread = threading.Thread(target=self._poll, daemon=True)
+        self._command_thread.start()
+        self._read_thread.start()
+
+    def set_target(self, closedness: float) -> None:
+        if not math.isfinite(closedness) or not 0 <= closedness <= 1:
+            raise ValueError("closedness must be finite in [0, 1]")
+        with self._condition:
+            if self._stop.is_set():
+                raise RuntimeError("gripper is closed")
+            self.check_error()
+            self._desired = float(closedness)
+            self._condition.notify()
+
+    def check_error(self) -> None:
+        if self._error is not None:
+            raise RuntimeError(f"firmware gripper {self.side} failed") from self._error
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._stop.is_set() or self._desired is not None)
+                if self._stop.is_set():
+                    return
+                target, self._desired = self._desired, None
+                self._busy = True
+            try:
+                with self._io_lock:
+                    if self._stop.is_set():
+                        return
+                    self._command.gripper_set(self.side, target)
+            except Exception as exc:
+                with self._condition:
+                    self._error = exc
+                    self._desired = None
+                return
+            finally:
+                with self._condition:
+                    self._busy = False
+                    self._condition.notify_all()
+
+    def wait_idle(self) -> None:
+        with self._condition:
+            if not self._condition.wait_for(
+                    lambda: not self._busy and self._desired is None, timeout=45):
+                raise TimeoutError("firmware gripper did not finish")
+            self.check_error()
+
+    def _poll(self) -> None:
+        while not self._stop.is_set():
+            try:
+                with self._io_lock:
+                    if self._stop.is_set():
+                        return
+                    report = self._reader.gripper_state(self.side)
+                with self._condition:
+                    self._report = report
+                    if report.kind in ("timeout", "fault", "blind", "lost"):
+                        self._error = RuntimeError(f"gripper stroke outcome: {report.kind}")
+                        self._desired = None
+                        self._condition.notify_all()
+                    # Busy stroke reports have no measurement timestamp. A
+                    # successful HTTP GET must not make old jaws look fresh.
+                    if report.live:
+                        self._sample_at = time.monotonic()
+            except Exception:
+                with self._condition:
+                    self._report = None
+            self._stop.wait(0.1)
+
+    def measured_rad(self) -> float | None:
+        self.check_error()
+        with self._condition:
+            if (self._busy or self._desired is not None or self._report is None or not self._report.live
+                    or time.monotonic() - self._sample_at > 0.5):
+                return None
+            return self._report.jaw_rad
+
+    @property
+    def last_outcome(self):
+        return self._report
+
+    def jaw_age_s(self) -> float | None:
+        return None if not self._sample_at else time.monotonic() - self._sample_at
+
+    def release(self) -> None:
+        with self._condition:
+            self._stop.set()
+            self._desired = None
+            self._condition.notify_all()
+        self._command_thread.join()
+        self._read_thread.join()
+        self._command.close()
+        self._reader.close()
