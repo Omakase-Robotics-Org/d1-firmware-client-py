@@ -80,20 +80,39 @@ class FirmwareGripper:
                     if self._stop.is_set():
                         return
                     report = self._reader.gripper_state(self.side)
-                with self._condition:
-                    self._report = report
-                    if report.kind in ("timeout", "fault", "blind", "lost"):
-                        self._error = RuntimeError(f"gripper stroke outcome: {report.kind}")
-                        self._desired = None
-                        self._condition.notify_all()
-                    # Busy stroke reports have no measurement timestamp. A
-                    # successful HTTP GET must not make old jaws look fresh.
-                    if report.live:
-                        self._sample_at = time.monotonic()
+                self._absorb(report)
             except Exception:
                 with self._condition:
                     self._report = None
             self._stop.wait(0.1)
+
+    def refresh(self) -> GripperState | None:
+        """One synchronous state read, so a caller that just finished a stroke
+        sees THAT stroke's outcome rather than whatever the 10 Hz poll last
+        stored. Returns None when the daemon could not be read."""
+        try:
+            with self._io_lock:
+                report = self._reader.gripper_state(self.side)
+        except Exception:
+            return None
+        self._absorb(report)
+        return report
+
+    def _absorb(self, report: GripperState) -> None:
+        with self._condition:
+            self._report = report
+            # ``blind`` is a stroke that got no CAN feedback and swept
+            # single-shot; on the D1 passthrough that is a dropped reply, not
+            # a failed motor, so it is reported (kind + live=False) and left
+            # for the caller to retry or reject.
+            if report.kind in ("timeout", "fault", "lost"):
+                self._error = RuntimeError(f"gripper stroke outcome: {report.kind}")
+                self._desired = None
+                self._condition.notify_all()
+            # Busy stroke reports have no measurement timestamp. A
+            # successful HTTP GET must not make old jaws look fresh.
+            if report.live:
+                self._sample_at = time.monotonic()
 
     def measured_rad(self) -> float | None:
         self.check_error()
