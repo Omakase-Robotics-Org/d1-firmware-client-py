@@ -92,3 +92,34 @@ class ClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_gripper_repeat_target_is_not_resent():
+    """A caller that re-asserts the same closedness every tick must not
+    re-stroke the daemon every tick (teleop asserts the button state
+    continuously)."""
+    import threading, time
+    from d1fw_client.gripper import FirmwareGripper
+    from d1fw_client import GripperState
+
+    class Client:
+        sets = []
+        def __init__(self, *a, **k): pass
+        def gripper_set(self, side, value, grip=None): Client.sets.append(value)
+        def gripper_state(self, side): return GripperState("open", 1.0, 0.0, False, 0.0, True, 1.35)
+        def close(self): pass
+
+    import d1fw_client.gripper as g
+    saved = g.FirmwareClient
+    g.FirmwareClient = Client
+    try:
+        w = FirmwareGripper("http://x", "b")
+        for _ in range(5):
+            w.set_target(1.0)
+            w.wait_idle()
+        w.set_target(0.0); w.wait_idle()
+        w.set_target(1.0); w.wait_idle()
+        assert Client.sets == [1.0, 0.0, 1.0]
+        w.release()
+    finally:
+        g.FirmwareClient = saved

@@ -26,6 +26,7 @@ class FirmwareGripper:
         self._io_lock = threading.Lock()
         self._stop = threading.Event()
         self._desired = None
+        self._last_sent: float | None = None
         self._busy = False
         self._error = None
         self._report: GripperState | None = None
@@ -42,7 +43,15 @@ class FirmwareGripper:
             if self._stop.is_set():
                 raise RuntimeError("gripper is closed")
             self.check_error()
-            self._desired = float(closedness)
+            target = float(closedness)
+            # A repeat of the target already sent (and not superseded) is a
+            # no-op: a caller that re-asserts "closed" every tick must not
+            # re-stroke the daemon every tick. A different target, or the same
+            # target after a differing one, still goes out.
+            if (self._desired is None and self._last_sent is not None
+                    and abs(target - self._last_sent) < 1e-9):
+                return
+            self._desired = target
             self._condition.notify()
 
     def check_error(self) -> None:
@@ -62,6 +71,8 @@ class FirmwareGripper:
                     if self._stop.is_set():
                         return
                     self._command.gripper_set(self.side, target, grip=self.grip)
+                with self._condition:
+                    self._last_sent = target
             except Exception as exc:
                 with self._condition:
                     self._error = exc
