@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from . import FirmwareClient, GripperState, side_name
+from . import FirmwareClient, Grip, GripperState, side_name
 
 class FirmwareGripper:
     """Continuous latest-target worker, with independently polled feedback.
@@ -12,8 +12,14 @@ class FirmwareGripper:
     next caller. close/release discard queued commands and join the worker;
     an already accepted daemon stroke can finish, but no new stroke follows.
     """
-    def __init__(self, base_url: str, side: str):
+    def __init__(self, base_url: str, side: str, grip: Grip | None = None):
+        """``grip`` is the hold-force preset sent with every closing target
+        (soft/firm/strong, the daemon's per-robot presets); None leaves the
+        daemon's configured default preload."""
+        if grip not in (None, "soft", "firm", "strong"):
+            raise ValueError("grip must be soft, firm, strong or None")
         self.side = side_name(side)
+        self.grip: Grip | None = grip
         self._command = FirmwareClient(base_url, timeout=40)
         self._reader = FirmwareClient(base_url, timeout=1)
         self._condition = threading.Condition()
@@ -55,7 +61,7 @@ class FirmwareGripper:
                 with self._io_lock:
                     if self._stop.is_set():
                         return
-                    self._command.gripper_set(self.side, target)
+                    self._command.gripper_set(self.side, target, grip=self.grip)
             except Exception as exc:
                 with self._condition:
                     self._error = exc
