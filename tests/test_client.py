@@ -5,7 +5,8 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from d1fw_client import FirmwareClient, FirmwareError, ProtocolError
+from d1fw_client import (ArmState, DeviceUnavailable, EyesState, FirmwareClient,
+                         FirmwareError, GripperState, NeckState, ProtocolError, SliderState)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -77,6 +78,38 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.client.gripper_set("a", 1.1)
         self.assertEqual(self.server.calls, [])
+
+    def test_unreadable_device_slot_is_a_device_failure_not_a_protocol_error(self):
+        """A state slot never fails the whole response: `/v1/slider/state` is
+        one slot of the six-device snapshot, so a slider the daemon cannot
+        reach comes back as `200 ok` with `{"error": ...}` in `data`. That is
+        a device failure reported correctly, and it must read as one -- the
+        old behaviour raised `ProtocolError("invalid slider state: 'height_m'")`,
+        which sends the reader looking for a broken daemon instead of a
+        disconnected lift."""
+        self.server.response = (200, {"status": "ok", "message": None,
+                                      "data": {"error": "device error: slider port closed"}})
+        with self.assertRaises(DeviceUnavailable) as caught:
+            self.client.slider_state()
+        self.assertIn("device error: slider port closed", str(caught.exception))
+        self.assertIn("/v1/slider/state", str(caught.exception))
+        # It is a device failure, so it is catchable exactly like one on any
+        # other verb rather than needing its own except clause.
+        self.assertIsInstance(caught.exception, FirmwareError)
+        self.assertNotIsInstance(caught.exception, ProtocolError)
+
+        # Every state slot degrades the same way in `/v1/state`, so every
+        # parser has to read it the same way.
+        for parser in (ArmState, GripperState, NeckState, SliderState, EyesState):
+            with self.assertRaises(DeviceUnavailable):
+                parser.parse({"error": "device error: unreachable"})
+
+        # A genuinely malformed payload is still a protocol error, and an
+        # `error` key alongside real fields is not the degraded form.
+        with self.assertRaises(ProtocolError):
+            SliderState.parse({"error": 17})
+        with self.assertRaises(ProtocolError):
+            SliderState.parse({"error": "x", "height_m": 0.1})
 
     def test_bad_shape(self):
         self.server.response = (200, {"status": "ok", "data": {}})

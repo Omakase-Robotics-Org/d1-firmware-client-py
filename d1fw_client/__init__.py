@@ -13,7 +13,7 @@ import json
 import math
 import socket
 import threading
-from typing import Any, Literal, Sequence
+from typing import Any, ClassVar, Literal, Sequence
 from urllib.parse import urlsplit
 
 Side = Literal["a", "b"]
@@ -31,6 +31,27 @@ class FirmwareError(RuntimeError):
 
 class ProtocolError(RuntimeError):
     """The server did not return the advertised response shape."""
+
+
+class DeviceUnavailable(FirmwareError):
+    """The daemon answered, but could not read that device.
+
+    A state slot never fails the whole response: `/v1/state` reads six devices
+    concurrently and `/v1/slider/state` is one of its slots, so a device the
+    daemon could not reach degrades to ``{"error": "..."}`` in its own slot
+    while the request still succeeds. That is a device failure reported
+    correctly, not a server that broke its contract, so it is raised as a
+    `FirmwareError` carrying the daemon's own explanation -- the same class a
+    caller already catches for a device failure on any other verb -- rather
+    than as a `ProtocolError` about a missing field.
+    """
+
+
+def _reject_degraded_slot(value: Any, endpoint: str) -> None:
+    """Raise `DeviceUnavailable` when a slot is the degraded error form."""
+    if (isinstance(value, dict) and set(value) == {"error"}
+            and isinstance(value["error"], str)):
+        raise DeviceUnavailable("GET", endpoint, 200, value["error"])
 
 
 def side_name(side: str) -> Side:
@@ -59,8 +80,11 @@ class ArmState:
     frame_serial: int
     stationary: bool
 
+    endpoint: ClassVar[str] = "/v1/arm/{side}/state"
+
     @classmethod
     def parse(cls, value: Any) -> ArmState:
+        _reject_degraded_slot(value, cls.endpoint)
         try:
             arrays = {key: joints7(value[key]) for key in (
                 "feedback_joints", "command_joints", "feedback_velocity",
@@ -91,8 +115,11 @@ class GripperState:
     open_rad: float | None = None
     coil_c: int | None = None
 
+    endpoint: ClassVar[str] = "/v1/gripper/{side}/state"
+
     @classmethod
     def parse(cls, value: Any) -> GripperState:
+        _reject_degraded_slot(value, cls.endpoint)
         try:
             fields = {key: float(value[key]) for key in (
                 "jaw_rad", "torque_nm", "grip_preload_rad")}
@@ -125,8 +152,11 @@ class NeckState:
     yaw_torque: float
     enabled: bool
 
+    endpoint: ClassVar[str] = "/v1/neck/state"
+
     @classmethod
     def parse(cls, value: Any) -> NeckState:
+        _reject_degraded_slot(value, cls.endpoint)
         try:
             fields = {key: float(value[key]) for key in (
                 "pitch", "yaw", "pitch_velocity", "yaw_velocity", "pitch_torque", "yaw_torque")}
@@ -149,8 +179,11 @@ class SliderState:
     alarm: bool
     alarm_text: str | None = None
 
+    endpoint: ClassVar[str] = "/v1/slider/state"
+
     @classmethod
     def parse(cls, value: Any) -> SliderState:
+        _reject_degraded_slot(value, cls.endpoint)
         try:
             height = float(value["height_m"])
             if not math.isfinite(height):
@@ -172,8 +205,11 @@ class EyesState:
     initialized: bool
     last_effect: str | None = None
 
+    endpoint: ClassVar[str] = "/v1/eyes/state"
+
     @classmethod
     def parse(cls, value: Any) -> EyesState:
+        _reject_degraded_slot(value, cls.endpoint)
         try:
             if not isinstance(value["mode"], str) or type(value["initialized"]) is not bool:
                 raise ValueError("mode must be a string and initialized a boolean")
