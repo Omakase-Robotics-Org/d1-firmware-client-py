@@ -3,7 +3,7 @@
 Install this checkout in each consumer's Python environment:
 
 ```sh
-python -m pip install -e /path/to/exp--d1-firmware/python
+python -m pip install -e /path/to/d1-firmware/python
 ```
 
 `FirmwareClient` uses one locked keep-alive HTTP connection. Arm joint targets
