@@ -6,7 +6,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from d1fw_client import (ArmState, DeviceUnavailable, EyesState, FirmwareClient,
-                         FirmwareError, GripperState, NeckState, ProtocolError, SliderState)
+                         FirmwareError, GripperState, HandState, NeckState, ProtocolError,
+                         SliderState)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -115,6 +116,50 @@ class ClientTests(unittest.TestCase):
         self.server.response = (200, {"status": "ok", "data": {}})
         with self.assertRaises(ProtocolError):
             self.client.arm_state("a")
+
+    def test_hand_commands_send_the_axis_vector_and_its_unit(self):
+        self.client.hand_set("a", [0.25] * 20)
+        self.client.hand_set("b", [255] * 20, unit="wire")
+        self.client.hand_fist("a")
+        self.assertEqual(json.loads(self.server.calls[0][1]),
+                         {"axes": [0.25] * 20, "unit": "frac"})
+        self.assertEqual(json.loads(self.server.calls[1][1]),
+                         {"axes": [255.0] * 20, "unit": "wire"})
+        self.assertEqual([call[0] for call in self.server.calls],
+                         ["/v1/hand/a/set", "/v1/hand/b/set", "/v1/hand/a/fist"])
+
+    def test_hand_validates_before_sending(self):
+        for axes in ([], [float("nan")] * 20, [1.5] * 20, [-0.1] * 20):
+            with self.assertRaises(ValueError):
+                self.client.hand_set("a", axes)
+        with self.assertRaises(ValueError):
+            self.client.hand_set("a", [0.5] * 20, unit="deg")
+        with self.assertRaises(ValueError):
+            self.client.hand_set("c", [0.5] * 20)
+        # A raw wire value outside [0, 1] is legal; only fractions are bounded
+        # here, and the daemon refuses an out-of-range wire value by name.
+        self.client.hand_set("a", [255] * 20, unit="wire")
+        self.assertEqual(len(self.server.calls), 1)
+
+    def test_hand_state_shape_is_checked(self):
+        payload = {"model": "linkerbot/o30", "side": "a",
+                   "positions": [0.5, 0.25], "positions_wire": [128, 64],
+                   "enabled": [True, True], "all_enabled": True,
+                   "error_code": 0, "faults": [], "live": True,
+                   "features": ["command-priority"]}
+        self.server.response = (200, {"status": "ok", "data": payload, "message": None})
+        state = self.client.hand_state("a")
+        self.assertIsInstance(state, HandState)
+        self.assertEqual(state.positions_wire, (128, 64))
+        self.assertTrue(state.live)
+
+        # Arrays that disagree on the axis count are a protocol error, not a
+        # silently short hand.
+        self.server.response = (200, {"status": "ok",
+                                      "data": {**payload, "enabled": [True]},
+                                      "message": None})
+        with self.assertRaises(ProtocolError):
+            self.client.hand_state("a")
 
     def test_close_cannot_reopen(self):
         self.client.close()

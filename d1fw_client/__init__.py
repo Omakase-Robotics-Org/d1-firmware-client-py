@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 Side = Literal["a", "b"]
 Grip = Literal["soft", "firm", "strong"]
+HandUnit = Literal["frac", "wire"]
 Joints7 = tuple[float, float, float, float, float, float, float]
 
 
@@ -138,6 +139,54 @@ class GripperState:
                        **fields)
         except (KeyError, TypeError, ValueError) as exc:
             raise ProtocolError(f"invalid gripper state: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class HandState:
+    """One sample of a dexterous hand.
+
+    ``positions`` is per axis in fractions of that axis's range; the axis
+    ORDER is the model's own and is published by ``hand_capabilities``, so a
+    consumer reads it rather than hardcoding a per-model list. ``live`` is
+    false when the daemon answered from its last sample because the hand's
+    bus was busy with a motion command — the same meaning it has on
+    ``GripperState``.
+    """
+    model: str
+    side: Side
+    positions: tuple[float, ...]
+    positions_wire: tuple[int, ...]
+    enabled: tuple[bool, ...]
+    all_enabled: bool
+    error_code: int
+    faults: tuple[str, ...]
+    live: bool
+    features: tuple[str, ...]
+
+    @classmethod
+    def parse(cls, value: Any) -> HandState:
+        try:
+            positions = tuple(float(v) for v in value["positions"])
+            if not all(math.isfinite(v) for v in positions):
+                raise ValueError("non-finite hand position")
+            wire = tuple(int(v) for v in value["positions_wire"])
+            enabled = tuple(value["enabled"])
+            if not all(type(flag) is bool for flag in enabled):
+                raise ValueError("enabled must be a list of booleans")
+            if len(positions) != len(wire) or len(positions) != len(enabled):
+                raise ValueError("hand arrays disagree on the axis count")
+            if type(value["all_enabled"]) is not bool or type(value["live"]) is not bool:
+                raise ValueError("all_enabled and live must be boolean")
+            if type(value["error_code"]) is not int:
+                raise ValueError("error_code must be an integer")
+            return cls(model=str(value["model"]), side=side_name(value["side"]),
+                       positions=positions, positions_wire=wire, enabled=enabled,
+                       all_enabled=value["all_enabled"], error_code=value["error_code"],
+                       faults=tuple(str(f) for f in value["faults"]),
+                       live=value["live"],
+                       features=tuple(str(f) for f in value["features"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError(f"invalid hand state: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -301,6 +350,56 @@ class FirmwareClient:
 
     def gripper_state(self, side: str) -> GripperState:
         return GripperState.parse(self.request("GET", f"/v1/gripper/{side_name(side)}/state"))
+
+    def hand_set(self, side: str, axes: Sequence[float], *,
+                 unit: HandUnit = "frac") -> None:
+        """Command every axis of a dexterous hand.
+
+        ``axes`` is one value per axis in the model's own order (see
+        ``hand_capabilities()["axis_names"]``). ``unit="frac"`` is 0.0-1.0 of
+        each axis's range; ``unit="wire"`` is the raw vendor unit (0-255 on
+        the LinkerHand O30, 0-10000 on the Leadshine DH116S). There is no
+        degree unit: the O30's per-joint range of motion is unpublished and
+        the direction of zero differs per joint type.
+        """
+        if unit not in ("frac", "wire"):
+            raise ValueError("unit must be frac or wire")
+        values = [float(v) for v in axes]
+        if not values or not all(math.isfinite(v) for v in values):
+            raise ValueError("axes must be a non-empty list of finite numbers")
+        if unit == "frac" and not all(0.0 <= v <= 1.0 for v in values):
+            raise ValueError("fractional axis values must be within [0, 1]")
+        self.request("POST", f"/v1/hand/{side_name(side)}/set",
+                     {"axes": values, "unit": unit})
+
+    def hand_enable(self, side: str) -> None:
+        self.request("POST", f"/v1/hand/{side_name(side)}/enable")
+
+    def hand_disable(self, side: str) -> None:
+        """Disable the joints. This does NOT open the hand: both models hold
+        their pose with the motors off, so opening would drop what is held."""
+        self.request("POST", f"/v1/hand/{side_name(side)}/disable")
+
+    def hand_open(self, side: str) -> None:
+        self.request("POST", f"/v1/hand/{side_name(side)}/open")
+
+    def hand_fist(self, side: str) -> None:
+        self.request("POST", f"/v1/hand/{side_name(side)}/fist")
+
+    def hand_state(self, side: str) -> HandState:
+        return HandState.parse(self.request("GET", f"/v1/hand/{side_name(side)}/state"))
+
+    def hand_capabilities(self, side: str) -> dict[str, Any]:
+        """Axis names and order, wire range, presets and feature tokens.
+
+        Negotiate on the ``features`` tokens rather than on a version string:
+        a token is a promise that something works, and tokens are added but
+        never renamed or removed.
+        """
+        return self.request("GET", f"/v1/hand/{side_name(side)}/capabilities")
+
+    def hand_release_soft_kill(self) -> None:
+        self.request("POST", "/v1/hand/release_soft_kill")
 
     # -- neck (pan/tilt) ------------------------------------------------------- #
     def neck_state(self) -> NeckState:
