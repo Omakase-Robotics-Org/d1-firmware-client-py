@@ -36,7 +36,14 @@ class FirmwareGripper:
         self._command_thread.start()
         self._read_thread.start()
 
-    def set_target(self, closedness: float) -> None:
+    def set_target(self, closedness: float, *, force: bool = False) -> None:
+        """Queue a closedness target (0 open .. 1 closed).
+
+        A repeat of the target already sent (and not superseded) is a no-op —
+        a caller that re-asserts "closed" every tick must not re-stroke the
+        daemon every tick. ``force=True`` sends it anyway: a deliberate
+        re-stroke, such as re-opening after a stroke came back ``blind``.
+        """
         if not math.isfinite(closedness) or not 0 <= closedness <= 1:
             raise ValueError("closedness must be finite in [0, 1]")
         with self._condition:
@@ -44,11 +51,7 @@ class FirmwareGripper:
                 raise RuntimeError("gripper is closed")
             self.check_error()
             target = float(closedness)
-            # A repeat of the target already sent (and not superseded) is a
-            # no-op: a caller that re-asserts "closed" every tick must not
-            # re-stroke the daemon every tick. A different target, or the same
-            # target after a differing one, still goes out.
-            if (self._desired is None and self._last_sent is not None
+            if (not force and self._desired is None and self._last_sent is not None
                     and abs(target - self._last_sent) < 1e-9):
                 return
             self._desired = target

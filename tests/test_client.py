@@ -120,6 +120,8 @@ def test_gripper_repeat_target_is_not_resent():
         w.set_target(0.0); w.wait_idle()
         w.set_target(1.0); w.wait_idle()
         assert Client.sets == [1.0, 0.0, 1.0]
+        w.set_target(1.0, force=True); w.wait_idle()   # a deliberate re-stroke goes out
+        assert Client.sets == [1.0, 0.0, 1.0, 1.0]
         w.release()
     finally:
         g.FirmwareClient = saved
