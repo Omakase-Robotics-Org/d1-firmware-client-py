@@ -113,6 +113,81 @@ class GripperState:
             raise ProtocolError(f"invalid gripper state: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class NeckState:
+    """`GET /v1/neck/state`: pitch/yaw in radians (positive pitch = look up,
+    positive yaw = turn right), velocities in rad/s, torques in N·m."""
+    pitch: float
+    yaw: float
+    pitch_velocity: float
+    yaw_velocity: float
+    pitch_torque: float
+    yaw_torque: float
+    enabled: bool
+
+    @classmethod
+    def parse(cls, value: Any) -> NeckState:
+        try:
+            fields = {key: float(value[key]) for key in (
+                "pitch", "yaw", "pitch_velocity", "yaw_velocity", "pitch_torque", "yaw_torque")}
+            if not all(math.isfinite(v) for v in fields.values()):
+                raise ValueError("non-finite neck reading")
+            if type(value["enabled"]) is not bool:
+                raise ValueError("enabled must be boolean")
+            return cls(enabled=value["enabled"], **fields)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError(f"invalid neck state: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class SliderState:
+    """`GET /v1/slider/state`: the torso lift. `height_m` is metres above the
+    lower stop."""
+    comms_ok: bool
+    height_m: float
+    moving: bool
+    alarm: bool
+    alarm_text: str | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> SliderState:
+        try:
+            height = float(value["height_m"])
+            if not math.isfinite(height):
+                raise ValueError("non-finite height")
+            for key in ("comms_ok", "moving", "alarm"):
+                if type(value[key]) is not bool:
+                    raise ValueError(f"{key} must be boolean")
+            text = value.get("alarm_text")
+            return cls(comms_ok=value["comms_ok"], height_m=height, moving=value["moving"],
+                       alarm=value["alarm"], alarm_text=None if text is None else str(text))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError(f"invalid slider state: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class EyesState:
+    """`GET /v1/eyes/state`."""
+    mode: str
+    initialized: bool
+    last_effect: str | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> EyesState:
+        try:
+            if not isinstance(value["mode"], str) or type(value["initialized"]) is not bool:
+                raise ValueError("mode must be a string and initialized a boolean")
+            effect = value.get("last_effect")
+            return cls(mode=value["mode"], initialized=value["initialized"],
+                       last_effect=None if effect is None else str(effect))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError(f"invalid eyes state: {exc}") from exc
+
+
+EyeTarget = Literal["both", "left", "right"]
+ConversationState = Literal["standby", "starting", "conversing"]
+
+
 class FirmwareClient:
     def __init__(self, base_url: str = "http://127.0.0.1:4750", *,
                  timeout: float = 2.0):
@@ -190,6 +265,102 @@ class FirmwareClient:
 
     def gripper_state(self, side: str) -> GripperState:
         return GripperState.parse(self.request("GET", f"/v1/gripper/{side_name(side)}/state"))
+
+    # -- neck (pan/tilt) ------------------------------------------------------- #
+    def neck_state(self) -> NeckState:
+        return NeckState.parse(self.request("GET", "/v1/neck/state"))
+
+    def neck_cmd(self, *, pitch: float | None = None, yaw: float | None = None,
+                 relative: bool = False, velocity: float | None = None) -> None:
+        """Pose (or delta with ``relative=True``) in radians; ``velocity`` in rad/s
+        (None = the daemon's default)."""
+        body: dict[str, Any] = {"relative": bool(relative)}
+        for name, value in (("pitch", pitch), ("yaw", yaw), ("velocity", velocity)):
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(f"neck {name} must be finite")
+                body[name] = value
+        if "pitch" not in body and "yaw" not in body:
+            raise ValueError("neck_cmd needs pitch and/or yaw")
+        self.request("POST", "/v1/neck/cmd", body)
+
+    def neck_enable(self) -> None:
+        self.request("POST", "/v1/neck/enable", {})
+
+    def neck_disable(self) -> None:
+        self.request("POST", "/v1/neck/disable", {})
+
+    def neck_home(self) -> None:
+        self.request("POST", "/v1/neck/home", {})
+
+    def neck_set_zero(self) -> None:
+        self.request("POST", "/v1/neck/set_zero", {})
+
+    # -- eyes (LED strips) ------------------------------------------------------ #
+    def eyes_state(self) -> EyesState:
+        return EyesState.parse(self.request("GET", "/v1/eyes/state"))
+
+    def eyes_effect(self, target: EyeTarget, effect: str, **params: Any) -> None:
+        """One LED effect on ``target`` (both/left/right): ``effect`` is the
+        daemon's tag (breathe, running, solid, clear, stop, ...) and ``params``
+        its fields (r, g, b, step, delay_ms, ...)."""
+        if target not in ("both", "left", "right"):
+            raise ValueError("target must be both, left or right")
+        self.request("POST", "/v1/eyes/cmd", {"target": target, "effect": effect, **params})
+
+    def eyes_set_expression(self, name: str, *, speed: float | None = None,
+                            loops: int | None = None) -> None:
+        body: dict[str, Any] = {"name": str(name)}
+        if speed is not None:
+            body["speed"] = float(speed)
+        if loops is not None:
+            body["loops"] = int(loops)
+        self.request("POST", "/v1/eyes/set_expression", body)
+
+    def eyes_list_expressions(self) -> Any:
+        return self.request("GET", "/v1/eyes/list_expressions")
+
+    def eyes_conversation_state(self, state: ConversationState) -> None:
+        state = str(state).lower()
+        if state not in ("standby", "starting", "conversing"):
+            raise ValueError("conversation state must be standby, starting or conversing")
+        self.request("POST", "/v1/eyes/conversation_state", {"state": state})
+
+    def eyes_battery_level(self, percent: float | None) -> None:
+        self.request("POST", "/v1/eyes/battery_level",
+                     {"percent": None if percent is None else float(percent)})
+
+    def eyes_pixel(self, target: EyeTarget, index: int, r: int, g: int, b: int, *,
+                   delay_ms: int | None = None) -> None:
+        if target not in ("left", "right"):
+            raise ValueError("pixel target must be left or right")
+        body: dict[str, Any] = {"target": target, "index": int(index), "r": int(r), "g": int(g), "b": int(b)}
+        if delay_ms is not None:
+            body["delay_ms"] = int(delay_ms)
+        self.request("POST", "/v1/eyes/pixel", body)
+
+    # -- slider (torso lift) ---------------------------------------------------- #
+    def slider_state(self) -> SliderState:
+        return SliderState.parse(self.request("GET", "/v1/slider/state"))
+
+    def slider_set_height(self, height_m: float, *, wait: bool = False) -> None:
+        """Absolute height in metres. ``wait=True`` returns after the daemon
+        reports arrival — construct the client with a timeout that covers the
+        travel (the lift moves ~0.3 m in a few seconds)."""
+        height_m = float(height_m)
+        if not math.isfinite(height_m) or height_m < 0.0:
+            raise ValueError("height_m must be finite and non-negative")
+        self.request("POST", "/v1/slider/set_height", {"height_m": height_m, "wait": bool(wait)})
+
+    def slider_stop(self) -> None:
+        self.request("POST", "/v1/slider/stop", {})
+
+    def slider_home(self) -> None:
+        self.request("POST", "/v1/slider/home", {})
+
+    def slider_reset_alarm(self) -> None:
+        self.request("POST", "/v1/slider/reset_alarm", {})
 
     def close(self) -> None:
         with self._lock:

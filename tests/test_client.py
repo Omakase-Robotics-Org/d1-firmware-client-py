@@ -123,3 +123,43 @@ def test_gripper_repeat_target_is_not_resent():
         w.release()
     finally:
         g.FirmwareClient = saved
+
+
+class BodyDeviceTests(ClientTests):
+    def _last(self):
+        path, body, _ = self.server.calls[-1]
+        return path, json.loads(body)
+
+    def test_neck_cmd_posts_radians_and_relative_flag(self):
+        self.client.neck_cmd(pitch=-0.6, yaw=0.1, relative=True, velocity=0.5)
+        path, body = self._last()
+        self.assertEqual(path, "/v1/neck/cmd")
+        self.assertEqual(body, {"relative": True, "pitch": -0.6, "yaw": 0.1, "velocity": 0.5})
+        with self.assertRaises(ValueError):
+            self.client.neck_cmd()
+
+    def test_neck_state_parses(self):
+        self.server.response = (200, {"status": "ok", "message": None, "data": {
+            "pitch": -0.18, "yaw": 0.0, "pitch_velocity": 0.0, "yaw_velocity": 0.0,
+            "pitch_torque": 0.1, "yaw_torque": 0.0, "enabled": True}})
+        state = self.client.neck_state()
+        self.assertEqual((state.pitch, state.enabled), (-0.18, True))
+
+    def test_slider_set_height_and_state(self):
+        self.client.slider_set_height(0.2, wait=True)
+        self.assertEqual(self._last(), ("/v1/slider/set_height", {"height_m": 0.2, "wait": True}))
+        self.server.response = (200, {"status": "ok", "message": None, "data": {
+            "comms_ok": True, "height_m": 0.201, "moving": False, "alarm": False, "alarm_text": None}})
+        self.assertEqual(self.client.slider_state().height_m, 0.201)
+        with self.assertRaises(ValueError):
+            self.client.slider_set_height(-0.1)
+
+    def test_eyes_expression_conversation_and_effect(self):
+        self.client.eyes_set_expression("blink", speed=1.0, loops=2)
+        self.assertEqual(self._last(), ("/v1/eyes/set_expression", {"name": "blink", "speed": 1.0, "loops": 2}))
+        self.client.eyes_conversation_state("conversing")
+        self.assertEqual(self._last(), ("/v1/eyes/conversation_state", {"state": "conversing"}))
+        self.client.eyes_effect("both", "solid", r=0, g=128, b=255)
+        self.assertEqual(self._last(), ("/v1/eyes/cmd", {"target": "both", "effect": "solid", "r": 0, "g": 128, "b": 255}))
+        with self.assertRaises(ValueError):
+            self.client.eyes_conversation_state("dancing")
