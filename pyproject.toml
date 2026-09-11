@@ -16,7 +16,13 @@ version = "0.2.0"
 description = "Python client for d1-firmwared (REST/WS): the consumer-facing half of the D1 firmware contract"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "LicenseRef-Proprietary"
+# No `license` key on purpose. The PEP 639 string form needs
+# setuptools >= 77, and a robot venv that installs with
+# `--no-build-isolation` against an older setuptools dies in metadata
+# generation rather than installing — which is precisely the machine
+# this package has to install on. The repository is private; its terms
+# are the firmware's (openapi/d1-firmwared.v1.json carries
+# LicenseRef-Proprietary), not something packaging metadata settles.
 # No runtime dependencies, and that is a requirement rather than an accident:
 # this client is imported inside a 1 kHz arm tick on robots whose venvs are
 # already crowded, and by a pin-check that runs before anything else is trusted
