@@ -16,6 +16,8 @@ import threading
 from typing import Any, ClassVar, Literal, Sequence
 from urllib.parse import urlsplit
 
+from .spec import SPEC_PATH, spec_document, spec_operations, spec_version
+
 Side = Literal["a", "b"]
 Grip = Literal["soft", "firm", "strong"]
 HandUnit = Literal["frac", "wire"]
@@ -290,7 +292,8 @@ class FirmwareClient:
         self._lock = threading.Lock()
         self._closed = False
 
-    def request(self, method: str, path: str, body: Any = None) -> Any:
+    def _send(self, method: str, path: str, body: Any = None) -> tuple[int, bytes]:
+        """One request on the locked connection. No envelope, no retry."""
         payload = None if body is None else json.dumps(body, allow_nan=False)
         with self._lock:
             if self._closed:
@@ -302,22 +305,40 @@ class FirmwareClient:
                 self._connection.request(method, path, payload,
                                          {"Content-Type": "application/json"})
                 response = self._connection.getresponse()
-                raw = response.read()
-                status = response.status
+                return response.status, response.read()
             except (OSError, http.client.HTTPException):
                 self._connection.close()
                 raise
-            try:
-                envelope = json.loads(raw)
-            except (ValueError, UnicodeError) as exc:
-                raise ProtocolError(f"{method} {path}: HTTP {status}, invalid JSON") from exc
-            if not isinstance(envelope, dict) or envelope.get("status") not in ("ok", "error"):
-                raise ProtocolError(f"{method} {path}: invalid envelope")
-            if not 200 <= status < 300 or envelope["status"] != "ok":
-                raise FirmwareError(method, path, status, str(envelope.get("message")))
-            if "data" not in envelope:
-                raise ProtocolError(f"{method} {path}: missing data")
-            return envelope["data"]
+
+    def request(self, method: str, path: str, body: Any = None) -> Any:
+        status, raw = self._send(method, path, body)
+        try:
+            envelope = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise ProtocolError(f"{method} {path}: HTTP {status}, invalid JSON") from exc
+        if not isinstance(envelope, dict) or envelope.get("status") not in ("ok", "error"):
+            raise ProtocolError(f"{method} {path}: invalid envelope")
+        if not 200 <= status < 300 or envelope["status"] != "ok":
+            raise FirmwareError(method, path, status, str(envelope.get("message")))
+        if "data" not in envelope:
+            raise ProtocolError(f"{method} {path}: missing data")
+        return envelope["data"]
+
+    def daemon_spec_version(self) -> str:
+        """``info.version`` of the OpenAPI document THIS daemon serves.
+
+        ``GET /openapi.json`` is the one route outside the `/v1` surface and
+        the one response that is NOT enveloped -- it is the document itself --
+        so it does not go through :meth:`request`. Compare the result with
+        :func:`spec_version`, the version this client was built against.
+        """
+        status, raw = self._send("GET", "/openapi.json")
+        try:
+            document = json.loads(raw)
+            return str(document["info"]["version"])
+        except (ValueError, UnicodeError, KeyError, TypeError) as exc:
+            raise ProtocolError(
+                f"GET /openapi.json: HTTP {status}, not an OpenAPI document") from exc
 
     def arm_state(self, side: str) -> ArmState:
         return ArmState.parse(self.request("GET", f"/v1/arm/{side_name(side)}/state"))

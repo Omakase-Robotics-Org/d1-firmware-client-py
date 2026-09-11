@@ -1,0 +1,18 @@
+This directory is a VENDORED COPY. Do not hand-edit d1-firmwared.v1.json.
+
+source repository  Omakase-Robotics-Org/d1-firmware
+source path        openapi/d1-firmwared.v1.json
+source commit      1937f575d80fec2f4b01f51d127f49291fb11cfa   (main, 2026-09-10)
+daemon version     0.1.0   (workspace Cargo.toml `version`)
+spec info.version  0.1.0   (the value `spec_version()` returns)
+
+The firmware daemon serves this exact document, byte for byte, at
+`GET /openapi.json` (crates/d1fw-front-rest/src/routes.rs `include_str!`s the
+committed file). So a robot that answers with a different `info.version` than
+`d1fw_client.spec_version()` is running a daemon this client was not built
+against -- that is the comparison this copy exists to make possible.
+
+To refresh: copy the file from the firmware repository at the commit you want,
+update the three source lines above, and bump `project.version` in
+pyproject.toml so pip actually reinstalls it on the robots (see
+tools/check_version_bump.py).

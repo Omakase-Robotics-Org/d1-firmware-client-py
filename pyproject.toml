@@ -4,9 +4,41 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "d1fw-client"
-version = "0.1.0"
-description = "Typed persistent REST client for d1-firmwared"
+# Consumers pin this repository by COMMIT and pip decides whether to reinstall
+# by VERSION, so a change consumers must pick up carries a bump here. CI
+# enforces it (tools/check_version_bump.py).
+#
+# 0.2.0: the client moved out of Omakase-Robotics-Org/d1-firmware into its own
+# repository. The import name `d1fw_client` and every verb are unchanged; what
+# changed is where it is installed from, that the OpenAPI document now ships
+# inside the package, and `spec_version()` / `daemon_spec_version()`.
+version = "0.2.0"
+description = "Python client for d1-firmwared (REST/WS): the consumer-facing half of the D1 firmware contract"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+# No runtime dependencies, and that is a requirement rather than an accident:
+# this client is imported inside a 1 kHz arm tick on robots whose venvs are
+# already crowded, and by a pin-check that runs before anything else is trusted
+# to import. http.client + json + threading from the stdlib cover the whole
+# REST surface.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/Omakase-Robotics-Org/d1-firmware-client-py"
+"Firmware (spec source)" = "https://github.com/Omakase-Robotics-Org/d1-firmware"
 
 [tool.setuptools.packages.find]
 include = ["d1fw_client*"]
+
+# The OpenAPI document is installed WITH the package. A consumer has the
+# firmware binary and this client, never a firmware checkout, so the copy it
+# compares against the live daemon has to travel inside the wheel.
+[tool.setuptools.package-data]
+d1fw_client = ["openapi/*.json", "openapi/SPEC_SOURCE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
